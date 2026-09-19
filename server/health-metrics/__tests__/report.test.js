@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 const { buildReport, renderReportText } = require('../report');
 const { aggregateEvents, mergeDailyBreakdown } = require('../aggregator');
-const { validateTrackBody } = require('../routes');
+const { validateTrackBody, resolveReportRange } = require('../routes');
 
 const ev = (day, email, page, extra = {}) => ({
   ts: `2026-09-${day}T10:00:00.000Z`, email, page, userType: 'unknown', roles: [], ...extra,
@@ -80,5 +80,18 @@ describe('validateTrackBody', () => {
     expect(validateTrackBody({ page: 'm::v', action: 'a'.repeat(65) }).error).toBeTruthy();
     expect(validateTrackBody({ page: 'no-separator' }).error).toBeTruthy();
     expect(validateTrackBody(undefined).error).toBeTruthy();
+  });
+});
+
+describe('resolveReportRange', () => {
+  it('defaults to the 7 days ending today', () => {
+    expect(resolveReportRange({}, '2026-09-19')).toEqual({ from: '2026-09-13', to: '2026-09-19' });
+  });
+
+  it('rejects malformed, impossible and inverted dates without throwing', () => {
+    expect(resolveReportRange({ to: '9999-99-99' })).toBeNull();
+    expect(resolveReportRange({ from: '2026-13-40', to: '2026-09-19' })).toBeNull();
+    expect(resolveReportRange({ to: 'yesterday' })).toBeNull();
+    expect(resolveReportRange({ from: '2026-09-20', to: '2026-09-19' })).toBeNull();
   });
 });

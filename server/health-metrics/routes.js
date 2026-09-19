@@ -7,6 +7,17 @@ const PAGE_ID_PATTERN = /^[a-zA-Z0-9:_/-]+$/;
 const PAGE_ID_MAX_LENGTH = 200;
 const ACTION_MAX_LENGTH = 64;
 
+// Resolves the /report date range. Returns null when either date is malformed or not a
+// real date (9999-99-99), or from > to. Default: the 7 days ending at `to` (today, UTC).
+const DAY = /^\d{4}-\d{2}-\d{2}$/;
+function resolveReportRange({ from, to } = {}, today = new Date().toISOString().slice(0, 10)) {
+  to = to || today;
+  if (!DAY.test(to) || isNaN(Date.parse(to))) return null;
+  from = from || new Date(Date.parse(to) - 6 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+  if (!DAY.test(from) || isNaN(Date.parse(from)) || from > to) return null;
+  return { from, to };
+}
+
 // Validates a POST /track body. Returns { error } or { page, action, detail }.
 // action/detail use the same allowlist as page so free text (search queries,
 // issue titles) cannot be stored even if a caller passes it by mistake.
@@ -277,6 +288,32 @@ function createHealthMetricsRouter(context, { eventsDir, getModules } = {}) {
 
   // ─── Routes: Tracking ───
 
+  /**
+   * @openapi
+   * /api/health-metrics/track:
+   *   post:
+   *     tags: [Health Metrics]
+   *     summary: Record a view open or an interaction inside a view
+   *     description: Rate limited to 120 events per user per minute. Identical events within 10 seconds are dropped.
+   *     requestBody:
+   *       required: true
+   *       content:
+   *         application/json:
+   *           schema:
+   *             type: object
+   *             required: [page]
+   *             properties:
+   *               page: { type: string, description: 'moduleSlug::viewId', example: 'ai-impact::rfe-review' }
+   *               action: { type: string, description: 'Defaults to view. Id-style characters only, max 64.', example: filter }
+   *               detail: { type: string, description: 'Stable id of the control used. Id-style characters only, max 64.', example: status }
+   *     responses:
+   *       200:
+   *         description: Recorded, deduplicated, or skipped because the user opted out
+   *       400:
+   *         description: Invalid page, action or detail
+   *       429:
+   *         description: Rate limit exceeded
+   */
   router.post('/track', requireScope('health-metrics:write'), async (req, res) => {
     if (DEMO_MODE) return res.json({ ok: true });
 
@@ -504,13 +541,39 @@ function createHealthMetricsRouter(context, { eventsDir, getModules } = {}) {
 
   // ─── Routes: Text report (admin or viewer) ───
 
+  /**
+   * @openapi
+   * /api/health-metrics/report:
+   *   get:
+   *     tags: [Health Metrics]
+   *     summary: Usage report over raw events, as plain text or JSON
+   *     description: Requires admin or the usage-metrics-viewer role. Reaches back only as far as the event retention period.
+   *     parameters:
+   *       - in: query
+   *         name: from
+   *         schema: { type: string, format: date }
+   *         description: Start date, inclusive (default 6 days before `to`)
+   *       - in: query
+   *         name: to
+   *         schema: { type: string, format: date }
+   *         description: End date, inclusive (default today, UTC)
+   *       - in: query
+   *         name: format
+   *         schema: { type: string, enum: [text, json], default: text }
+   *     responses:
+   *       200:
+   *         description: Usage report
+   *       400:
+   *         description: Invalid date range
+   *       403:
+   *         description: Requires admin or usage-metrics-viewer role
+   *       503:
+   *         description: Raw events are not recorded in demo mode
+   */
   router.get('/report', requireMetricsViewer, requireScope('health-metrics:read'), async (req, res) => {
-    const DAY = /^\d{4}-\d{2}-\d{2}$/;
-    const to = req.query.to || new Date().toISOString().slice(0, 10);
-    const from = req.query.from || new Date(Date.parse(to) - 6 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
-    if (!DAY.test(from) || !DAY.test(to) || isNaN(Date.parse(from)) || isNaN(Date.parse(to)) || from > to) {
-      return res.status(400).json({ error: 'from and to must be YYYY-MM-DD, with from <= to.' });
-    }
+    const range = resolveReportRange(req.query);
+    if (!range) return res.status(400).json({ error: 'from and to must be YYYY-MM-DD, with from <= to.' });
+    const { from, to } = range;
     if (!eventStore) return res.status(503).json({ error: 'Raw events are not recorded in demo mode.' });
 
     // Raw events only: the report needs per-user days, which monthly aggregates drop.
@@ -608,4 +671,4 @@ function createHealthMetricsRouter(context, { eventsDir, getModules } = {}) {
   return router;
 }
 
-module.exports = { createHealthMetricsRouter, validateTrackBody };
+module.exports = { createHealthMetricsRouter, validateTrackBody, resolveReportRange };
