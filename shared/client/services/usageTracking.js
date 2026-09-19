@@ -52,9 +52,10 @@ export function trackPageView(page) {
  * Record an interaction inside the current view.
  * @param {string} action - short verb: tab, filter, search, open, link, button, wizard, settings
  * @param {string} [detail] - stable id of the control ([a-zA-Z0-9:_/-], max 64). Not user input.
+ * @param {string} [page] - `module::id` for UI that lives outside a module view (e.g. a
+ *   home-page widget, where the shell records no page). Defaults to the current view.
  */
-export function trackUsage(action, detail) {
-  const page = resolvePage()
+export function trackUsage(action, detail, page = resolvePage()) {
   if (!page || !action) return
   post(detail ? { page, action, detail } : { page, action })
 }

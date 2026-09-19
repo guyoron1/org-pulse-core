@@ -36,6 +36,12 @@ describe('usageTracking', () => {
   it('sends nothing for opted-out users or shell views', async () => {
     window.location.hash = '#/'
     trackUsage('button', 'x')
+    expect(fetch).not.toHaveBeenCalled()
+    trackUsage('view', '', 'ai-impact::sotu/rfe-actions') // widgets name their own page
+    await flush()
+    expect(tracked()).toEqual([{ page: 'ai-impact::sotu/rfe-actions', action: 'view' }])
+
+    _resetUsageTracking()
     global.fetch = vi.fn(() => Promise.resolve({ json: () => Promise.resolve({ optedOut: true }) }))
     window.location.hash = '#/ai-impact/autofix'
     trackUsage('button', 'x')
