@@ -1,8 +1,33 @@
 const express = require('express');
 const { createEventStore } = require('./event-store');
 const { aggregateEvents, mergeDailyBreakdown } = require('./aggregator');
+const { buildReport, renderReportText } = require('./report');
 
-function createHealthMetricsRouter(context, { eventsDir } = {}) {
+const PAGE_ID_PATTERN = /^[a-zA-Z0-9:_/-]+$/;
+const PAGE_ID_MAX_LENGTH = 200;
+const ACTION_MAX_LENGTH = 64;
+
+// Validates a POST /track body. Returns { error } or { page, action, detail }.
+// action/detail use the same allowlist as page so free text (search queries,
+// issue titles) cannot be stored even if a caller passes it by mistake.
+function validateTrackBody(body) {
+  const { page, action = 'view', detail = '' } = body || {};
+  if (!page || typeof page !== 'string' || !page.includes('::')) {
+    return { error: 'Invalid page format. Expected module::viewId.' };
+  }
+  if (page.length > PAGE_ID_MAX_LENGTH || !PAGE_ID_PATTERN.test(page)) {
+    return { error: 'Invalid page ID: too long or contains invalid characters.' };
+  }
+  for (const [name, val, required] of [['action', action, true], ['detail', detail, false]]) {
+    if (typeof val !== 'string' || (required && !val)) return { error: `Invalid ${name}.` };
+    if (val && (val.length > ACTION_MAX_LENGTH || !PAGE_ID_PATTERN.test(val))) {
+      return { error: `Invalid ${name}: too long or contains invalid characters.` };
+    }
+  }
+  return { page, action, detail };
+}
+
+function createHealthMetricsRouter(context, { eventsDir, getModules } = {}) {
   const { storage, requireAdmin, requireScope, roleStore } = context;
   const { readFromStorage, writeToStorage, getFileMtime, listStorageFiles } = storage;
 
@@ -76,8 +101,8 @@ function createHealthMetricsRouter(context, { eventsDir } = {}) {
   const recentEvents = new Set();
   const DEDUP_WINDOW_MS = 10_000;
 
-  function isDuplicate(email, page) {
-    const key = `${email}::${page}`;
+  function isDuplicate(email, page, action, detail) {
+    const key = `${email}::${page}::${action}::${detail}`;
     if (recentEvents.has(key)) return true;
     recentEvents.add(key);
     setTimeout(() => recentEvents.delete(key), DEDUP_WINDOW_MS);
@@ -234,7 +259,8 @@ function createHealthMetricsRouter(context, { eventsDir } = {}) {
 
   // ─── Per-user rate limiting for /track ───
 
-  const RATE_LIMIT_MAX = 30;
+  // 120/min: a view open plus in-view interactions (tabs, filters, links) share this budget
+  const RATE_LIMIT_MAX = 120;
   const RATE_LIMIT_WINDOW_MS = 60_000;
   const rateCounts = new Map();
 
@@ -251,19 +277,11 @@ function createHealthMetricsRouter(context, { eventsDir } = {}) {
 
   // ─── Routes: Tracking ───
 
-  const PAGE_ID_PATTERN = /^[a-zA-Z0-9:_/-]+$/;
-  const PAGE_ID_MAX_LENGTH = 200;
-
   router.post('/track', requireScope('health-metrics:write'), async (req, res) => {
     if (DEMO_MODE) return res.json({ ok: true });
 
-    const { page } = req.body;
-    if (!page || typeof page !== 'string' || !page.includes('::')) {
-      return res.status(400).json({ error: 'Invalid page format. Expected module::viewId.' });
-    }
-    if (page.length > PAGE_ID_MAX_LENGTH || !PAGE_ID_PATTERN.test(page)) {
-      return res.status(400).json({ error: 'Invalid page ID: too long or contains invalid characters.' });
-    }
+    const { error, page, action, detail } = validateTrackBody(req.body);
+    if (error) return res.status(400).json({ error });
 
     const email = req.userEmail;
     if (!email) return res.status(401).json({ error: 'Authentication required.' });
@@ -280,19 +298,23 @@ function createHealthMetricsRouter(context, { eventsDir } = {}) {
     }
 
     // Server-side dedup
-    if (isDuplicate(email, page)) {
+    if (isDuplicate(email, page, action, detail)) {
       return res.json({ ok: true, deduped: true });
     }
 
     const userType = (req.userUid && userTypeCache.get(req.userUid)) || 'unknown';
 
-    eventStore.append({
+    const event = {
       ts: new Date().toISOString(),
       page,
+      action,
       email,
       userType,
       roles: req.userRoles || [],
-    });
+      isManager: !!req.isManager,
+    };
+    if (detail) event.detail = detail;
+    eventStore.append(event);
 
     invalidateCurrentMonthCache();
     res.json({ ok: true });
@@ -480,6 +502,32 @@ function createHealthMetricsRouter(context, { eventsDir } = {}) {
     res.json({ userTypes });
   });
 
+  // ─── Routes: Text report (admin or viewer) ───
+
+  router.get('/report', requireMetricsViewer, requireScope('health-metrics:read'), async (req, res) => {
+    const DAY = /^\d{4}-\d{2}-\d{2}$/;
+    const to = req.query.to || new Date().toISOString().slice(0, 10);
+    const from = req.query.from || new Date(Date.parse(to) - 6 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+    if (!DAY.test(from) || !DAY.test(to) || isNaN(Date.parse(from)) || isNaN(Date.parse(to)) || from > to) {
+      return res.status(400).json({ error: 'from and to must be YYYY-MM-DD, with from <= to.' });
+    }
+    if (!eventStore) return res.status(503).json({ error: 'Raw events are not recorded in demo mode.' });
+
+    // Raw events only: the report needs per-user days, which monthly aggregates drop.
+    const events = [];
+    for (const monthKey of eventStore.listMonthFiles()) {
+      if (monthKey < from.slice(0, 7) || monthKey > to.slice(0, 7)) continue;
+      for (const e of eventStore.readMonth(monthKey)) {
+        const day = (e.ts || '').slice(0, 10);
+        if (day >= from && day <= to) events.push(e);
+      }
+    }
+
+    const report = buildReport(events, getModules ? getModules() : [], { from, to });
+    if (req.query.format === 'json') return res.json(report);
+    res.type('text/plain').send(renderReportText(report));
+  });
+
   // ─── Routes: Admin config ───
 
   router.get('/config', requireAdmin, requireScope('health-metrics:read'), async (req, res) => {
@@ -560,4 +608,4 @@ function createHealthMetricsRouter(context, { eventsDir } = {}) {
   return router;
 }
 
-module.exports = { createHealthMetricsRouter };
+module.exports = { createHealthMetricsRouter, validateTrackBody };
