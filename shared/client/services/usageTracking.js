@@ -30,9 +30,13 @@ function post(body) {
   }).catch(() => {})
 }
 
-function pageFromHash() {
+// The hash is the source of truth for where the user is; currentPage only adds
+// detail the hash lacks (reports/<id>). Shell views (#/, #/settings) are not tracked.
+function resolvePage() {
   const [slug, viewId] = window.location.hash.slice(2).split('?')[0].split('/')
-  return slug && viewId ? `${slug}::${viewId}` : null
+  if (!slug) return null
+  if (currentPage && currentPage.startsWith(`${slug}::${viewId || ''}`)) return currentPage
+  return viewId ? `${slug}::${viewId}` : null
 }
 
 /** Record a view open. Called by the shell on every route change. */
@@ -50,7 +54,7 @@ export function trackPageView(page) {
  * @param {string} [detail] - stable id of the control ([a-zA-Z0-9:_/-], max 64). Not user input.
  */
 export function trackUsage(action, detail) {
-  const page = currentPage || pageFromHash()
+  const page = resolvePage()
   if (!page || !action) return
   post(detail ? { page, action, detail } : { page, action })
 }

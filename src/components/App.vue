@@ -804,13 +804,15 @@ export default {
 
         const viewId = parts[1] || this.getDefaultViewId(manifest)
         this.activeViewId = viewId
-        await this.loadModuleView(manifest.slug, viewId)
 
-        // Usage tracking beacon — fire-and-forget (opt-out, demo mode and dedup live in the helper)
+        // Usage tracking beacon — fire-and-forget (opt-out, demo mode and dedup live in the helper).
+        // Before the view loads, so interactions the view reports on mount land on this page.
         // Per-report tracking granularity: append report ID when viewing a specific report
         trackPageView(viewId === 'reports' && params.report
           ? `${manifest.slug}::reports/${params.report}`
           : `${manifest.slug}::${viewId}`)
+
+        await this.loadModuleView(manifest.slug, viewId)
         return
       }
 
